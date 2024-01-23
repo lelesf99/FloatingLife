@@ -21,23 +21,27 @@
   <body>
     <canvas></canvas>
     <script type="module">
-      const WORKGROUP_SIZE = 8;
-      const res = 16;
+      const WORKGROUP_SIZE = 4;
+      const res = 32;
       const GRID_SIZE_X = Math.ceil(window.innerWidth / res);
       const GRID_SIZE_Y = Math.ceil(window.innerHeight / res);
       let step = 0; // Track how many simulation steps have been run
 
       const canvas = document.querySelector("canvas");
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      canvas.width = GRID_SIZE_X * res;
+      canvas.height = GRID_SIZE_Y * res;
 
       if (!navigator.gpu) {
-        document.body.appendChild(document.createTextNode("WebGPU not supported on this browser."));
+        document.body.appendChild(
+          document.createTextNode("WebGPU not supported on this browser.")
+        );
         throw new Error("WebGPU not supported on this browser.");
-    }
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-          document.body.appendChild(document.createTextNode("No appropriate GPUAdapter found."));
+      }
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        document.body.appendChild(
+          document.createTextNode("No appropriate GPUAdapter found.")
+        );
         throw new Error("No appropriate GPUAdapter found.");
       }
       const device = await adapter.requestDevice();
@@ -48,7 +52,7 @@
         format: canvasFormat,
       });
 
-      const uniformArray = new Float32Array([GRID_SIZE_X, GRID_SIZE_Y]);
+      const uniformArray = new Float32Array([GRID_SIZE_X, GRID_SIZE_Y, res]);
       const uniformBuffer = device.createBuffer({
         label: "Grid Uniforms",
         size: uniformArray.byteLength,
@@ -57,9 +61,9 @@
       device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
 
       const vertices = new Float32Array([
-        -0.8, -0.8, 0.8, -0.8, 0.8, 0.8,
+        -1, -1, 1, -1, 1, 1,
 
-        -0.8, -0.8, 0.8, 0.8, -0.8, 0.8,
+        -1, -1, 1, 1, -1, 1,
       ]);
       const vertexBuffer = device.createBuffer({
         label: "Cell vertices",
@@ -101,7 +105,7 @@
       const cellShaderModule = device.createShaderModule({
         label: "Cell shader",
         code: `
-        @group(0) @binding(0) var<uniform> grid: vec2f;
+        @group(0) @binding(0) var<uniform> grid: vec3f;
         @group(0) @binding(1) var<storage> cellState: array<f32>;
 
         struct VertexInput {
@@ -112,10 +116,12 @@
         struct VertexOutput {
             @builtin(position) pos: vec4f,
             @location(0) cell: vec2f,
+            @location(1) state: f32,
         };
         @vertex
         fn vertexMain(input: VertexInput) -> VertexOutput  {
             let i = f32(input.instance);
+            let grid = grid.xy;
             let cell = vec2f(i % grid.x, floor(i / grid.x));
             let state = cellState[input.instance];
             let cellOffset = cell / grid * 2;
@@ -124,17 +130,58 @@
             var output: VertexOutput;
             output.pos = vec4f(gridPos, 0, 1);
             output.cell = cell;
+            output.state = state;
             return output;
         }
 
         struct FragInput {
+            @builtin(position) pos: vec4<f32>,
             @location(0) cell: vec2f,
+            @location(1) state: f32,
         };
 
         @fragment
         fn fragmentMain(input: FragInput) -> @location(0) vec4f {
-            let c = input.cell / grid;
-            return vec4f(c.y, c.y * .8, 1, 1);
+            let c = input.cell / grid.xy;
+
+            // Radius for the rounded corners
+            let cornerRadius = (0.2 * input.state);
+            let radiusCorrected = (1 - input.state)/2;
+
+            let topLeft = min(vec2f(cornerRadius, cornerRadius) + radiusCorrected, vec2f(0.5));
+            let topRight = vec2f(max(1 - cornerRadius - radiusCorrected, 0.5), min(cornerRadius + radiusCorrected, 0.5)) ;
+            let bottomLeft = vec2f(min(cornerRadius + radiusCorrected, 0.5), max(1 - cornerRadius  - radiusCorrected, 0.5));
+            let bottomRight = max(vec2f(1 - cornerRadius, 1 - cornerRadius) - radiusCorrected, vec2f(0.5));
+
+            let fragPos = fract(input.pos.xy / (grid.z));
+
+            let distTopLeft = length(fragPos - topLeft);
+            let distTopRight = length(fragPos - topRight);
+            let distBottomLeft = length(fragPos - bottomLeft);
+            let distBottomRight = length(fragPos - bottomRight);
+
+            if(fragPos.x < topLeft.x && fragPos.y < topLeft.y) {
+                if(distTopLeft > cornerRadius) {
+                    discard;
+                }
+            } 
+            if(fragPos.x > topRight.x && fragPos.y < topRight.y) {
+                if(distTopRight > cornerRadius) {
+                    discard;
+                }
+            } 
+            if(fragPos.x < bottomLeft.x && fragPos.y > bottomLeft.y) {
+                if(distBottomLeft > cornerRadius) {
+                    discard;
+                }
+            } 
+            if(fragPos.x > bottomRight.x && fragPos.y > bottomRight.y) {
+                if(distBottomRight > cornerRadius) {
+                    discard;
+                }
+            }
+
+            return vec4<f32>(c.y, c.y * 0.5, 0.5 + (c.x * 0.5), 1.0);
         }
         `,
       });
@@ -170,13 +217,13 @@
 
             // Conway's game of life rules:
             if(activeNeighbors < 2 || activeNeighbors > 3) {
-                cellStateOut[i] = cellStateIn[i] / 1.05;
-            } else if(activeNeighbors > 2.5) {
-                cellStateOut[i] = cellStateIn[i] + 0.05;
+                cellStateOut[i] = cellStateIn[i] / 1.02;
+            } else if(activeNeighbors > 2.8) {
+                cellStateOut[i] = cellStateIn[i] + 0.08;
             } else {
                 cellStateOut[i] = cellStateIn[i];
             }
-            cellStateOut[i] = clamp(cellStateOut[i], 0, 1.3);
+            cellStateOut[i] = clamp(cellStateOut[i], 0, 0.95);
         }`,
       });
       const bindGroupLayout = device.createBindGroupLayout({
